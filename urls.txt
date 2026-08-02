@@ -1,1 +1,3 @@
-
+https://fitn1.ir/Api/Hot/Hot.php
+https://fitn1.ir/Api/Zoro/Zoro.php
+https://fitn1.ir/Api/Nest/nestnewhome.php
