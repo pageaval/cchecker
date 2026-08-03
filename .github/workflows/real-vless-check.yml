@@ -4,13 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       max_configs:
-        description: "Maximum configs to test (0 = all)"
+        description: Maximum configs to test, 0 means all
         required: false
         default: "0"
+
       workers:
-        description: "Parallel tests"
+        description: Number of parallel tests
         required: false
-        default: "4"
+        default: "6"
+
+      batch_size:
+        description: Number of configs before each rest
+        required: false
+        default: "40"
+
+      batch_pause:
+        description: Rest time between batches in seconds
+        required: false
+        default: "15"
+
   schedule:
     - cron: "23 */6 * * *"
 
@@ -23,46 +35,83 @@ concurrency:
 
 jobs:
   test:
+    name: Test VLESS Configs
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
-    env:
-      XRAY_BIN: ./xray
-      WORKERS: ${{ github.event.inputs.workers || '4' }}
-      MAX_CONFIGS: ${{ github.event.inputs.max_configs || '0' }}
-      PROBE_TIMEOUT: "14"
-      STARTUP_TIMEOUT: "4"
+    # چون بین دسته‌ها استراحت وجود دارد، زمان کلی را بیشتر کردیم
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download latest stable Xray
+      - name: Set test variables
+        shell: bash
+        run: |
+          echo "MAX_CONFIGS=${{ inputs.max_configs || '0' }}" >> "$GITHUB_ENV"
+          echo "WORKERS=${{ inputs.workers || '6' }}" >> "$GITHUB_ENV"
+
+          echo "BATCH_SIZE=${{ inputs.batch_size || '40' }}" >> "$GITHUB_ENV"
+          echo "BATCH_PAUSE_SECONDS=${{ inputs.batch_pause || '15' }}" >> "$GITHUB_ENV"
+
+          echo "XRAY_BIN=./xray" >> "$GITHUB_ENV"
+
+          echo "PROBE_TIMEOUT=10" >> "$GITHUB_ENV"
+          echo "STARTUP_TIMEOUT=3" >> "$GITHUB_ENV"
+          echo "DOWNLOAD_TIMEOUT=20" >> "$GITHUB_ENV"
+
+          echo "IRAN_MIN_SUCCESSES=2" >> "$GITHUB_ENV"
+
+          echo "IRAN_PROBE_URLS=https://www.irnic.ir/,https://www.shaparak.ir/,https://www.isna.ir/" >> "$GITHUB_ENV"
+
+      - name: Show test settings
+        shell: bash
+        run: |
+          echo "Workers: $WORKERS"
+          echo "Batch size: $BATCH_SIZE"
+          echo "Pause between batches: $BATCH_PAUSE_SECONDS seconds"
+          echo "Maximum configs: $MAX_CONFIGS"
+          echo "Probe timeout: $PROBE_TIMEOUT seconds"
+
+      - name: Download latest Xray
         shell: bash
         run: |
           set -euo pipefail
-          API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-          URL="$(curl -fsSL "$API" | python3 -c '
-          import json,sys
-          data=json.load(sys.stdin)
-          names=["Xray-linux-64.zip", "Xray-linux-x64.zip"]
-          assets={a["name"]:a["browser_download_url"] for a in data["assets"]}
-          for name in names:
-              if name in assets:
-                  print(assets[name])
-                  break
-          else:
-              raise SystemExit("Linux x64 Xray asset not found")
-          ')"
-          curl -fL --retry 3 "$URL" -o xray.zip
-          unzip -q xray.zip xray
+
+          DOWNLOAD_URL="$(
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/XTLS/Xray-core/releases/latest" |
+            python3 -c '
+          import json
+          import sys
+
+          release = json.load(sys.stdin)
+
+          for asset in release.get("assets", []):
+              if asset.get("name") == "Xray-linux-64.zip":
+                  print(asset["browser_download_url"])
+                  raise SystemExit(0)
+
+          raise SystemExit("Xray-linux-64.zip was not found")
+          '
+          )"
+
+          curl -fL --retry 3 "$DOWNLOAD_URL" -o xray.zip
+
+          unzip -q xray.zip
+
           chmod +x xray
+
           ./xray version
 
-      - name: Run real tunnel tests
-        run: python3 scripts/real_test.py
+      - name: Run real VLESS tests
+        shell: bash
+        run: |
+          python3 scripts/real_test.py
 
-      - name: Upload result artifact
+      - name: Upload result files
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -71,22 +120,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Commit healthy configs
+      - name: Commit result files
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
-          test -d output || exit 0
+          if [ ! -d "output" ]; then
+            echo "Output directory does not exist."
+            exit 0
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add output/healthy.txt output/failed.txt output/results.json output/summary.json
+          git add output/
 
           if git diff --cached --quiet; then
-            echo "No result changes."
+            echo "No result changes to commit."
             exit 0
           fi
 
           git commit -m "Update real VLESS health results"
-          git push
+
+          git pull --rebase origin main
+
+          git push origin main
