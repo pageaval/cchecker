@@ -44,7 +44,7 @@ IRAN_PROBE_URLS = [
     url.strip()
     for url in os.getenv(
         "IRAN_PROBE_URLS",
-        "https://www.irnic.ir/,https://www.shaparak.ir/,https://www.isna.ir/",
+        "https://www.shaparak.ir/",
     ).split(",")
     if url.strip()
 ]
