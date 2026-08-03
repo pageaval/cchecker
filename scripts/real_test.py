@@ -23,11 +23,13 @@ URLS_FILE = Path(os.getenv("URLS_FILE", "urls.txt"))
 XRAY_BIN = os.getenv("XRAY_BIN", "./xray")
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 
-WORKERS = max(1, int(os.getenv("WORKERS", "4")))
-STARTUP_TIMEOUT = float(os.getenv("STARTUP_TIMEOUT", "4"))
-PROBE_TIMEOUT = int(os.getenv("PROBE_TIMEOUT", "14"))
-DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "25"))
+WORKERS = max(1, min(int(os.getenv("WORKERS", "6")), 12))
+STARTUP_TIMEOUT = float(os.getenv("STARTUP_TIMEOUT", "3"))
+PROBE_TIMEOUT = int(os.getenv("PROBE_TIMEOUT", "10"))
+DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "20"))
 MAX_CONFIGS = int(os.getenv("MAX_CONFIGS", "0"))  # 0 = no limit
+BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "40")))
+BATCH_PAUSE_SECONDS = max(0, int(os.getenv("BATCH_PAUSE_SECONDS", "15")))
 
 PROBE_URLS = [
     "https://www.gstatic.com/generate_204",
@@ -44,7 +46,7 @@ IRAN_PROBE_URLS = [
     url.strip()
     for url in os.getenv(
         "IRAN_PROBE_URLS",
-        "https://www.shaparak.ir/",
+        "https://www.irnic.ir/,https://www.shaparak.ir/,https://www.isna.ir/",
     ).split(",")
     if url.strip()
 ]
@@ -508,19 +510,64 @@ def main() -> int:
     total = len(items)
     print(f"Testing {total} unique configs with {WORKERS} workers", flush=True)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
-        futures = {executor.submit(test_one, item): item for item in items}
-        for index, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-            result = future.result()
-            results.append(result)
-            status = "OK" if result.ok else "FAIL"
+    completed_count = 0
+    batches = [
+        items[index:index + BATCH_SIZE]
+        for index in range(0, len(items), BATCH_SIZE)
+    ]
+    total_batches = len(batches)
+
+    print(
+        f"Created {total_batches} batches with up to {BATCH_SIZE} configs each",
+        flush=True,
+    )
+
+    for batch_number, batch_items in enumerate(batches, start=1):
+        print("=" * 72, flush=True)
+        print(
+            f"Starting batch {batch_number}/{total_batches}: "
+            f"{len(batch_items)} configs, {WORKERS} workers",
+            flush=True,
+        )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
+            futures = {executor.submit(test_one, item): item for item in batch_items}
+
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    config, source = futures[future]
+                    result = TestResult(
+                        config=config,
+                        ok=False,
+                        latency_ms=None,
+                        exit_ip=None,
+                        reason=f"Unhandled worker error: {type(exc).__name__}: {exc}",
+                        source=source,
+                    )
+
+                results.append(result)
+                completed_count += 1
+                status = "OK" if result.ok else "FAIL"
+                print(
+                    f"[{completed_count}/{total}] {status} "
+                    f"latency={result.latency_ms}ms exit={result.exit_ip or '-'} "
+                    f"iran={'YES' if result.iran_ok else 'NO'} "
+                    f"reason={result.reason}",
+                    flush=True,
+                )
+
+        print(f"Batch {batch_number}/{total_batches} completed", flush=True)
+
+        if batch_number < total_batches and BATCH_PAUSE_SECONDS > 0:
             print(
-                f"[{index}/{total}] {status} "
-                f"latency={result.latency_ms}ms exit={result.exit_ip or '-'} "
-                f"iran={'YES' if result.iran_ok else 'NO'} "
-                f"reason={result.reason}",
+                f"Resting {BATCH_PAUSE_SECONDS} seconds before the next batch...",
                 flush=True,
             )
+            time.sleep(BATCH_PAUSE_SECONDS)
+
+    print("All batches completed", flush=True)
 
     healthy = sorted(
         (r for r in results if r.ok),
